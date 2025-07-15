@@ -107,8 +107,9 @@ IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just
             service = parts[0]
             operation = parts[1]
             
-            # Common read patterns
-            if operation in ["describe", "list", "get", "show", "ls"]:
+            # Common read patterns - check if operation starts with these verbs
+            read_verbs = ["describe", "list", "get", "show", "ls"]
+            if any(operation.startswith(verb) for verb in read_verbs):
                 return True
                 
         return False
