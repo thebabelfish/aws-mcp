@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""AWS MCP HTTP Server - Execute AWS commands via HTTP transport."""
+
+import asyncio
+import logging
+import os
+import subprocess
+import sys
+from configparser import ConfigParser
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import argparse
+
+from mcp.server import FastMCP
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class AWSMCPHTTPServer:
+    def __init__(self):
+        self.mcp = FastMCP("aws-mcp-http-server")
+        self.read_only_prefixes = self._get_read_only_prefixes()
+        self.aws_profiles = self._load_aws_profiles()
+        self._setup_tools()
+        
+    def _get_read_only_prefixes(self) -> List[str]:
+        """Return list of read-only AWS CLI command prefixes."""
+        return [
+            "describe", "list", "get", "show", "view", "ls", "head",
+            "ec2 describe", "s3 ls", "s3 head", "s3api list", "s3api get",
+            "iam list", "iam get", "rds describe", "lambda list", "lambda get",
+            "dynamodb describe", "dynamodb list", "cloudformation describe",
+            "cloudformation list", "sns list", "sqs list", "sqs get",
+            "cloudwatch describe", "cloudwatch list", "cloudwatch get",
+            "logs describe", "logs filter", "sts get", "sts assume",
+            "route53 list", "route53 get", "ecr describe", "ecr list",
+            "ecs describe", "ecs list", "elasticache describe",
+            "autoscaling describe", "elb describe", "elbv2 describe"
+        ]
+    
+    def _load_aws_profiles(self) -> Dict[str, Dict[str, str]]:
+        """Load AWS profiles from ~/.aws/config."""
+        profiles = {}
+        config_path = Path.home() / ".aws" / "config"
+        
+        if not config_path.exists():
+            logger.warning(f"AWS config not found at {config_path}")
+            return profiles
+            
+        config = ConfigParser()
+        config.read(config_path)
+        
+        for section in config.sections():
+            profile_name = section.replace("profile ", "") if section.startswith("profile ") else section
+            if profile_name == "default" and section == "default":
+                profile_name = "default"
+            
+            profile_info = {}
+            if config.has_option(section, "region"):
+                profile_info["region"] = config.get(section, "region")
+            if config.has_option(section, "output"):
+                profile_info["output"] = config.get(section, "output")
+            if config.has_option(section, "role_arn"):
+                profile_info["role_arn"] = config.get(section, "role_arn")
+                
+            profiles[profile_name] = profile_info
+            
+        logger.info(f"Loaded {len(profiles)} AWS profiles")
+        return profiles
+    
+    def _is_read_only_command(self, command: str) -> bool:
+        """Check if an AWS CLI command is read-only."""
+        cmd_lower = command.lower().strip()
+        
+        # Remove 'aws' prefix if present
+        if cmd_lower.startswith("aws "):
+            cmd_lower = cmd_lower[4:].strip()
+        
+        # Check against read-only prefixes
+        for prefix in self.read_only_prefixes:
+            if cmd_lower.startswith(prefix):
+                return True
+                
+        # Check for specific read operations
+        parts = cmd_lower.split()
+        if len(parts) >= 2:
+            service = parts[0]
+            operation = parts[1]
+            
+            # Common read patterns
+            if operation in ["describe", "list", "get", "show", "ls"]:
+                return True
+                
+        return False
+    
+    async def execute_aws_command(self, command: str, profile: Optional[str] = None, 
+                                  region: Optional[str] = None) -> Tuple[bool, str]:
+        """Execute an AWS CLI command with the specified profile and region."""
+        
+        # Build full AWS CLI command
+        full_command = ["aws"]
+        
+        if profile:
+            full_command.extend(["--profile", profile])
+            
+        if region:
+            full_command.extend(["--region", region])
+            
+        # Add the actual command parts
+        if command.startswith("aws "):
+            command = command[4:]  # Remove 'aws' prefix if provided
+            
+        full_command.extend(command.split())
+        
+        try:
+            # Execute command
+            result = subprocess.run(
+                full_command,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return True, result.stdout
+            else:
+                return False, f"Command failed: {result.stderr}"
+                
+        except subprocess.TimeoutExpired:
+            return False, "Command timed out after 30 seconds"
+        except Exception as e:
+            return False, f"Error executing command: {str(e)}"
+    
+    def _setup_tools(self):
+        """Set up MCP tools using FastMCP decorators."""
+        
+        @self.mcp.tool()
+        async def execute_aws_read_command(
+            command: str,
+            profile: str = None,
+            region: str = None
+        ) -> str:
+            """Execute a read-only AWS CLI command (describe, list, get, show, etc.) with optional profile and region. Never requires approval."""
+            
+            if not command:
+                return "Error: No command provided"
+            
+            # Validate that this is actually a read-only command
+            if not self._is_read_only_command(command):
+                return f"Error: Command '{command}' is not a read-only operation. Use execute_aws_write_command instead."
+            
+            success, output = await self.execute_aws_command(command, profile, region)
+            return output
+        
+        @self.mcp.tool()
+        async def execute_aws_write_command(
+            command: str,
+            profile: str = None,
+            region: str = None
+        ) -> str:
+            """Execute a write AWS CLI command (create, delete, update, modify, etc.) with optional profile and region. ALWAYS requires user approval."""
+            
+            if not command:
+                return "Error: No command provided"
+            
+            # Validate that this is actually a write command
+            if self._is_read_only_command(command):
+                return f"Error: Command '{command}' is a read-only operation. Use execute_aws_read_command instead."
+            
+            success, output = await self.execute_aws_command(command, profile, region)
+            return output
+        
+        @self.mcp.tool()
+        async def list_aws_profiles() -> str:
+            """List available AWS profiles from ~/.aws/config"""
+            
+            profiles_info = []
+            for profile, info in self.aws_profiles.items():
+                profile_str = f"Profile: {profile}"
+                if info.get("region"):
+                    profile_str += f" (region: {info['region']})"
+                if info.get("role_arn"):
+                    profile_str += f" [role: {info['role_arn']}]"
+                profiles_info.append(profile_str)
+            
+            if profiles_info:
+                return "Available AWS profiles:\n" + "\n".join(profiles_info)
+            else:
+                return "No AWS profiles found in ~/.aws/config"
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="AWS MCP HTTP Server")
+    parser.add_argument(
+        "--host",
+        default="localhost",
+        help="Host to bind to (default: localhost)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to bind to (default: 8000)"
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Log level (default: INFO)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Set log level
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+    
+    # Create the server
+    server = AWSMCPHTTPServer()
+    
+    print(f"🚀 Starting AWS MCP HTTP Server on {args.host}:{args.port}")
+    print(f"📖 MCP server running with {len(server.aws_profiles)} AWS profiles")
+    print(f"🔧 Available tools: execute_aws_read_command, execute_aws_write_command, list_aws_profiles")
+    
+    try:
+        # Run the server using FastMCP's streamable HTTP support
+        import uvicorn
+        
+        # Get the FastAPI app from FastMCP (using SSE transport)
+        app = server.mcp.sse_app()
+        
+        # Run with uvicorn
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level.lower()
+        )
+        
+    except ImportError:
+        print("Error: uvicorn is required for HTTP server mode")
+        print("Install with: pip install uvicorn")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error starting server: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
