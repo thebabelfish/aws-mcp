@@ -71,20 +71,9 @@ class AWSMCPHTTPServer:
     
     def _setup_instructions(self):
         """Set up MCP server instructions for the client."""
-        self.mcp.instructions = """
-You are connected to an AWS MCP server with an ENFORCED permission model. Follow these rules exactly:
-
-🔥 CRITICAL PERMISSION RULES 🔥
-1. execute_aws_read_command: NEVER ask for permission. These are safe read-only operations (list, describe, get, show, ls, head). Execute immediately without any confirmation.
-
-2. execute_aws_write_command: ALWAYS ask for permission. These modify AWS resources (create, delete, update, modify, put, mb, cp, sync, rm).
-
-3. list_aws_profiles: NEVER ask for permission. This just lists available AWS profiles from ~/.aws/config.
-
-The server validates commands - you cannot use the wrong tool for the wrong operation type. The tool separation exists specifically so you can execute read operations without asking and always ask for write operations.
-
-IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just execute them immediately.
-"""
+        # FastMCP doesn't support setting instructions directly
+        # Instructions are handled through tool descriptions instead
+        pass
     
     def _is_read_only_command(self, command: str) -> bool:
         """Check if an AWS CLI command is read-only."""
