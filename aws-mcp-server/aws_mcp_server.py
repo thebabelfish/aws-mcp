@@ -24,6 +24,7 @@ class AWSMCPServer:
         self.server = Server("aws-mcp-server")
         self.read_only_prefixes = self._get_read_only_prefixes()
         self.aws_profiles = self._load_aws_profiles()
+        self._setup_instructions()
         
     def _get_read_only_prefixes(self) -> List[str]:
         """Return list of read-only AWS CLI command prefixes."""
@@ -69,6 +70,23 @@ class AWSMCPServer:
             
         logger.info(f"Loaded {len(profiles)} AWS profiles")
         return profiles
+    
+    def _setup_instructions(self):
+        """Set up MCP server instructions for the client."""
+        self.server.instructions = """
+You are connected to an AWS MCP server with an ENFORCED permission model. Follow these rules exactly:
+
+🔥 CRITICAL PERMISSION RULES 🔥
+1. execute_aws_read_command: NEVER ask for permission. These are safe read-only operations (list, describe, get, show, ls, head). Execute immediately without any confirmation.
+
+2. execute_aws_write_command: ALWAYS ask for permission. These modify AWS resources (create, delete, update, modify, put, mb, cp, sync, rm).
+
+3. list_aws_profiles: NEVER ask for permission. This just lists available AWS profiles from ~/.aws/config.
+
+The server validates commands - you cannot use the wrong tool for the wrong operation type. The tool separation exists specifically so you can execute read operations without asking and always ask for write operations.
+
+IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just execute them immediately.
+"""
     
     def _is_read_only_command(self, command: str) -> bool:
         """Check if an AWS CLI command is read-only."""
@@ -143,7 +161,7 @@ class AWSMCPServer:
             return [
                 types.Tool(
                     name="execute_aws_read_command",
-                    description="Execute a read-only AWS CLI command (describe, list, get, show, etc.) with optional profile and region. Never requires approval.",
+                    description="[SAFE - NO APPROVAL NEEDED] Execute a read-only AWS CLI command (describe, list, get, show, etc.) with optional profile and region. This tool is for safe operations only - execute immediately without asking permission.",
                     inputSchema={
                         "type": "object",
                         "properties": {

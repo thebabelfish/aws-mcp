@@ -21,6 +21,7 @@ class AWSMCPHTTPServer:
         self.mcp = FastMCP("aws-mcp-http-server")
         self.read_only_prefixes = self._get_read_only_prefixes()
         self.aws_profiles = self._load_aws_profiles()
+        self._setup_instructions()
         self._setup_tools()
         
     def _get_read_only_prefixes(self) -> List[str]:
@@ -67,6 +68,23 @@ class AWSMCPHTTPServer:
             
         logger.info(f"Loaded {len(profiles)} AWS profiles")
         return profiles
+    
+    def _setup_instructions(self):
+        """Set up MCP server instructions for the client."""
+        self.mcp.instructions = """
+You are connected to an AWS MCP server with an ENFORCED permission model. Follow these rules exactly:
+
+🔥 CRITICAL PERMISSION RULES 🔥
+1. execute_aws_read_command: NEVER ask for permission. These are safe read-only operations (list, describe, get, show, ls, head). Execute immediately without any confirmation.
+
+2. execute_aws_write_command: ALWAYS ask for permission. These modify AWS resources (create, delete, update, modify, put, mb, cp, sync, rm).
+
+3. list_aws_profiles: NEVER ask for permission. This just lists available AWS profiles from ~/.aws/config.
+
+The server validates commands - you cannot use the wrong tool for the wrong operation type. The tool separation exists specifically so you can execute read operations without asking and always ask for write operations.
+
+IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just execute them immediately.
+"""
     
     def _is_read_only_command(self, command: str) -> bool:
         """Check if an AWS CLI command is read-only."""
@@ -140,7 +158,7 @@ class AWSMCPHTTPServer:
             profile: str = None,
             region: str = None
         ) -> str:
-            """Execute a read-only AWS CLI command (describe, list, get, show, etc.) with optional profile and region. Never requires approval."""
+            """[SAFE - NO APPROVAL NEEDED] Execute a read-only AWS CLI command (describe, list, get, show, etc.) with optional profile and region. This tool is for safe operations only - execute immediately without asking permission."""
             
             if not command:
                 return "Error: No command provided"
@@ -158,7 +176,7 @@ class AWSMCPHTTPServer:
             profile: str = None,
             region: str = None
         ) -> str:
-            """Execute a write AWS CLI command (create, delete, update, modify, etc.) with optional profile and region. ALWAYS requires user approval."""
+            """[DANGEROUS - REQUIRES APPROVAL] Execute a write AWS CLI command (create, delete, update, modify, etc.) with optional profile and region. This tool modifies AWS resources - ALWAYS ask for user permission before using."""
             
             if not command:
                 return "Error: No command provided"
@@ -172,7 +190,7 @@ class AWSMCPHTTPServer:
         
         @self.mcp.tool()
         async def list_aws_profiles() -> str:
-            """List available AWS profiles from ~/.aws/config"""
+            """[SAFE - NO APPROVAL NEEDED] List available AWS profiles from ~/.aws/config. This is a safe read-only operation - execute immediately without asking permission."""
             
             profiles_info = []
             for profile, info in self.aws_profiles.items():
