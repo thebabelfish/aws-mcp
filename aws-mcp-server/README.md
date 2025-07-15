@@ -32,11 +32,17 @@ pip install -r requirements.txt
 
 ### Starting the Server
 
+#### Option 1: MCP stdio Server (for Claude Desktop)
 ```bash
 python aws_mcp_server.py
 ```
 
-The server communicates via stdio, making it compatible with MCP clients.
+#### Option 2: HTTP Server (for VS Code Copilot and HTTP MCP clients)
+```bash
+python aws_mcp_http_server.py --port 8000
+```
+
+The stdio server communicates via stdin/stdout for MCP clients. The HTTP server provides MCP over HTTP transport with SSE endpoints.
 
 ### Available Tools
 
@@ -62,6 +68,7 @@ The server communicates via stdio, making it compatible with MCP clients.
 
 ### Example Commands
 
+#### MCP Client (Claude Desktop)
 ```json
 // List S3 buckets (read-only, no approval needed)
 {
@@ -81,6 +88,29 @@ The server communicates via stdio, making it compatible with MCP clients.
     "region": "us-west-2"
   }
 }
+```
+
+#### HTTP MCP Client (VS Code Copilot, custom integrations)
+The HTTP server provides multiple transport options:
+
+**Direct MCP (Recommended for VS Code Copilot):**
+- **POST to root**: `POST http://localhost:8000/` with MCP JSON-RPC payload
+
+**Alternative transports:**
+- **Streamable HTTP**: `POST http://localhost:8000/mcp`
+- **SSE**: `GET http://localhost:8000/sse-transport/sse` + `POST http://localhost:8000/sse-transport/messages`
+
+Example MCP requests:
+```bash
+# List tools
+curl -X POST http://localhost:8000/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}'
+
+# Call read tool
+curl -X POST http://localhost:8000/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "execute_aws_read_command", "arguments": {"command": "s3 ls"}}, "id": 2}'
 ```
 
 ## Security
@@ -132,13 +162,19 @@ The server automatically reads your AWS configuration from:
 
 Claude Desktop will automatically prompt for approval before each write command due to the tool naming. This is enforced by the MCP server design and cannot be disabled.
 
-### GitHub Copilot (VS Code)
+### VS Code Copilot
 
-1. Open VS Code settings (Cmd/Ctrl + ,)
-2. Search for "github.copilot.chat.localmcpServers"
-3. Click "Edit in settings.json"
-4. Add the following configuration:
+VS Code Copilot can use either the stdio or HTTP MCP server:
 
+#### Option 1: HTTP MCP Server (Recommended)
+```bash
+python aws_mcp_http_server.py --port 8000
+```
+
+Configure VS Code Copilot to connect to:
+- **Direct MCP**: `POST http://localhost:8000/` (supports direct JSON-RPC)
+
+#### Option 2: stdio MCP Server
 ```json
 {
   "github.copilot.chat.localmcpServers": [
@@ -152,12 +188,9 @@ Claude Desktop will automatically prompt for approval before each write command 
 }
 ```
 
-5. Reload VS Code
-6. In Copilot Chat, you can now use @aws-mcp-server to access AWS commands
-
 **Permission Control:**
 
-VS Code Copilot will automatically prompt for approval before each write command due to the tool naming. This is enforced by the MCP server design and cannot be disabled.
+Both servers enforce the same permission model using separate tools for read vs write operations.
 
 ### OpenAI Codex / Custom Integrations
 

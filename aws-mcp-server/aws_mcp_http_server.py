@@ -224,13 +224,154 @@ def main():
     try:
         # Run the server using FastMCP's streamable HTTP support
         import uvicorn
+        from fastapi import FastAPI
+        from fastapi.responses import JSONResponse
         
-        # Get the FastAPI app from FastMCP (using SSE transport)
-        app = server.mcp.sse_app()
+        # Create a main FastAPI app
+        main_app = FastAPI(title="AWS MCP HTTP Server", version="0.1.0")
+        
+        # Add root endpoint for discovery
+        @main_app.get("/")
+        async def root():
+            return {
+                "name": "AWS MCP HTTP Server",
+                "version": "0.1.0",
+                "mcp_version": "2024-11-05",
+                "profiles": len(server.aws_profiles),
+                "tools": ["execute_aws_read_command", "execute_aws_write_command", "list_aws_profiles"],
+                "endpoints": {
+                    "mcp_streamable": "/mcp",
+                    "sse_endpoint": "/sse-transport/sse", 
+                    "sse_messages": "/sse-transport/messages",
+                    "direct_mcp": "/"
+                },
+                "description": "POST MCP requests directly to / or use /mcp for streamable transport"
+            }
+        
+        # Add direct MCP endpoint for clients that expect to POST to root
+        @main_app.post("/")
+        async def handle_mcp_request(request_data: dict):
+            """Handle MCP requests posted directly to root."""
+            from fastapi import Request
+            import json
+            
+            # Forward to the streamable HTTP handler
+            # This is a simplified approach - in production you'd want proper session management
+            try:
+                method = request_data.get("method")
+                if method == "tools/list":
+                    tools = []
+                    for tool_name in ["execute_aws_read_command", "execute_aws_write_command", "list_aws_profiles"]:
+                        if tool_name == "execute_aws_read_command":
+                            tools.append({
+                                "name": tool_name,
+                                "description": "Execute a read-only AWS CLI command. Never requires approval.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "command": {"type": "string"},
+                                        "profile": {"type": "string"},
+                                        "region": {"type": "string"}
+                                    },
+                                    "required": ["command"]
+                                }
+                            })
+                        elif tool_name == "execute_aws_write_command":
+                            tools.append({
+                                "name": tool_name,
+                                "description": "Execute a write AWS CLI command. ALWAYS requires user approval.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "command": {"type": "string"},
+                                        "profile": {"type": "string"},
+                                        "region": {"type": "string"}
+                                    },
+                                    "required": ["command"]
+                                }
+                            })
+                        else:
+                            tools.append({
+                                "name": tool_name,
+                                "description": "List available AWS profiles from ~/.aws/config",
+                                "inputSchema": {"type": "object", "properties": {}}
+                            })
+                    
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_data.get("id"),
+                        "result": {"tools": tools}
+                    }
+                
+                elif method == "tools/call":
+                    params = request_data.get("params", {})
+                    tool_name = params.get("name")
+                    arguments = params.get("arguments", {})
+                    
+                    if tool_name == "list_aws_profiles":
+                        profiles_info = []
+                        for profile, info in server.aws_profiles.items():
+                            profile_str = f"Profile: {profile}"
+                            if info.get("region"):
+                                profile_str += f" (region: {info['region']})"
+                            if info.get("role_arn"):
+                                profile_str += f" [role: {info['role_arn']}]"
+                            profiles_info.append(profile_str)
+                        
+                        result = "Available AWS profiles:\n" + "\n".join(profiles_info) if profiles_info else "No AWS profiles found"
+                        
+                        return {
+                            "jsonrpc": "2.0",
+                            "id": request_data.get("id"),
+                            "result": {"content": [{"type": "text", "text": result}]}
+                        }
+                    
+                    elif tool_name in ["execute_aws_read_command", "execute_aws_write_command"]:
+                        command = arguments.get("command", "")
+                        profile = arguments.get("profile")
+                        region = arguments.get("region")
+                        
+                        # Validate command type
+                        is_read_only = server._is_read_only_command(command)
+                        
+                        if tool_name == "execute_aws_read_command" and not is_read_only:
+                            result = f"Error: Command '{command}' is not a read-only operation. Use execute_aws_write_command instead."
+                        elif tool_name == "execute_aws_write_command" and is_read_only:
+                            result = f"Error: Command '{command}' is a read-only operation. Use execute_aws_read_command instead."
+                        else:
+                            success, output = await server.execute_aws_command(command, profile, region)
+                            result = output
+                        
+                        return {
+                            "jsonrpc": "2.0",
+                            "id": request_data.get("id"),
+                            "result": {"content": [{"type": "text", "text": result}]}
+                        }
+                
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_data.get("id"),
+                    "error": {"code": -32601, "message": f"Method not found: {method}"}
+                }
+                
+            except Exception as e:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_data.get("id"),
+                    "error": {"code": -32603, "message": f"Internal error: {str(e)}"}
+                }
+        
+        # Mount the MCP streamable HTTP app
+        streamable_app = server.mcp.streamable_http_app()
+        main_app.mount("/mcp", streamable_app)
+        
+        # Mount the SSE app for fallback
+        sse_app = server.mcp.sse_app()
+        main_app.mount("/sse-transport", sse_app)
         
         # Run with uvicorn
         uvicorn.run(
-            app,
+            main_app,
             host=args.host,
             port=args.port,
             log_level=args.log_level.lower()

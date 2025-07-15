@@ -2,3 +2,5 @@ mcp
 boto3
 click
 pyyaml
+uvicorn
+fastapi
