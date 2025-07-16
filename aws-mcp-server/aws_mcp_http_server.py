@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AWS MCP HTTP Server - Execute AWS commands via HTTP transport."""
+"""AWS MCP HTTP Server - Execute AWS commands via HTTP transport using FastMCP (DEPRECATED - use aws_mcp_http_server_v2.py)."""
 
 import asyncio
 import logging

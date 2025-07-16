@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 from configparser import ConfigParser
@@ -132,7 +133,13 @@ IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just
         if command.startswith("aws "):
             command = command[4:]  # Remove 'aws' prefix if provided
             
-        full_command.extend(command.split())
+        # Use shlex.split() to properly handle quoted JSON parameters
+        try:
+            command_parts = shlex.split(command)
+        except ValueError as e:
+            return False, f"Invalid command syntax: {str(e)}"
+        
+        full_command.extend(command_parts)
         
         try:
             # Execute command
