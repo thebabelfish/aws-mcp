@@ -12,6 +12,12 @@ from configparser import ConfigParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import argparse
+try:
+    import boto3
+    BOTO3_AVAILABLE = True
+except ImportError:
+    BOTO3_AVAILABLE = False
+    logger.warning("boto3 not available - Bedrock error fixing disabled")
 
 import mcp.server.stdio
 import mcp.types as types
@@ -160,6 +166,66 @@ IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just
         except Exception as e:
             return False, f"Error executing command: {str(e)}"
     
+    async def fix_aws_command_with_bedrock(self, failed_command: str, error_message: str, 
+                                           intent_description: str, profile: Optional[str] = None) -> str:
+        """Use Bedrock to fix a failed AWS CLI command."""
+        
+        if not BOTO3_AVAILABLE:
+            return "Error: boto3 is required for Bedrock integration. Install with: pip install boto3"
+        
+        try:
+            # Create Bedrock client with optional profile
+            session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+            bedrock = session.client('bedrock-runtime')
+            
+            # Construct prompt for AWS CLI expert
+            prompt = f"""You are an AWS CLI expert. A command failed and needs to be fixed.
+
+Failed Command: {failed_command}
+Error Message: {error_message}
+User Intent: {intent_description}
+
+Please provide ONLY the corrected AWS CLI command (without 'aws' prefix). 
+Focus on:
+1. Correct service and operation names
+2. Proper JSON formatting and escaping
+3. Required parameters that may be missing
+4. Correct syntax for filters, time periods, etc.
+
+Return only the fixed command, no explanation:"""
+            
+            # Call Bedrock Claude
+            response = bedrock.invoke_model(
+                modelId="anthropic.claude-3-haiku-20240307-v1:0",
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "messages": [{
+                        "role": "user", 
+                        "content": prompt
+                    }],
+                    "max_tokens": 1000,
+                    "temperature": 0.1
+                })
+            )
+            
+            # Parse response
+            result = json.loads(response['body'].read())
+            fixed_command = result['content'][0]['text'].strip()
+            
+            # Clean up the response (remove any markdown, explanations, etc.)
+            lines = fixed_command.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('#') and not line.startswith('```'):
+                    # Return first non-comment, non-markdown line
+                    return line
+            
+            return fixed_command
+            
+        except Exception as e:
+            logger.error(f"Bedrock error fixing failed: {str(e)}")
+            return f"Error: Could not fix command with Bedrock: {str(e)}"
+    
     def setup_handlers(self):
         """Set up MCP request handlers."""
         
@@ -213,10 +279,36 @@ IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just
                 ),
                 types.Tool(
                     name="list_aws_profiles",
-                    description="List available AWS profiles from ~/.aws/config",
+                    description="[SAFE - NO APPROVAL NEEDED] List available AWS profiles from ~/.aws/config. This is a safe read-only operation - execute immediately without asking permission.",
                     inputSchema={
                         "type": "object",
                         "properties": {}
+                    }
+                ),
+                types.Tool(
+                    name="fix_aws_command_error",
+                    description="[SAFE - NO APPROVAL NEEDED] Use Bedrock AI to fix a failed AWS CLI command. Provide the failed command, error message, and description of what you were trying to do. This helps get the correct AWS syntax on the second attempt.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "failed_command": {
+                                "type": "string",
+                                "description": "The AWS CLI command that failed (without 'aws' prefix)"
+                            },
+                            "error_message": {
+                                "type": "string",
+                                "description": "The error message returned by the failed command"
+                            },
+                            "intent_description": {
+                                "type": "string",
+                                "description": "Description of what you were trying to accomplish"
+                            },
+                            "profile": {
+                                "type": "string",
+                                "description": "AWS profile to use for Bedrock call (optional)"
+                            }
+                        },
+                        "required": ["failed_command", "error_message", "intent_description"]
                     }
                 )
             ]
@@ -297,6 +389,27 @@ IMPORTANT: Do not ask "Are you sure you want to..." for read-only commands. Just
                         type="text",
                         text="No AWS profiles found in ~/.aws/config"
                     )]
+                    
+            elif name == "fix_aws_command_error":
+                failed_command = arguments.get("failed_command", "")
+                error_message = arguments.get("error_message", "")
+                intent_description = arguments.get("intent_description", "")
+                profile = arguments.get("profile")
+                
+                if not failed_command or not error_message or not intent_description:
+                    return [types.TextContent(
+                        type="text",
+                        text="Error: failed_command, error_message, and intent_description are required"
+                    )]
+                
+                fixed_command = await self.fix_aws_command_with_bedrock(
+                    failed_command, error_message, intent_description, profile
+                )
+                
+                return [types.TextContent(
+                    type="text",
+                    text=f"Suggested fix: {fixed_command}"
+                )]
                     
             else:
                 return [types.TextContent(
